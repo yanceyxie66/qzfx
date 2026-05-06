@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>学生问卷分析系统 v6.0</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="xlsx.full.min.js"></script>
+    <script src="chart.js"></script>
+    <script src="chartjs-plugin-datalabels@2.0.0.js"></script>
+    <style>
+        body { font-family: 'Microsoft YaHei', sans-serif; background-color: #f3f4f6; }
+        .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        .chart-container { position: relative; height: 500px; width: 100%; margin-top: 20px; }
+        
+        table { width: 100%; border-collapse: collapse; font-size: 14px; }
+        th, td { border: 1px solid #e5e7eb; padding: 10px; text-align: center; }
+        th { background-color: #f9fafb; font-weight: bold; color: #374151; }
+        tr:nth-child(even) { background-color: #f9fafb; }
+        tr:hover { background-color: #f3f4f6; }
+        .total-row { font-weight: bold; background-color: #eff6ff !important; color: #1e40af; }
+        
+        .option-desc { font-size: 12px; color: #6b7280; display: block; font-weight: normal; margin-top: 4px;}
+        .hidden { display: none; }
+        
+        /* 简单的动画效果 */
+        .highlight-change { animation: flash 1s; }
+        @keyframes flash {
+            0% { background-color: #dbeafe; }
+            100% { background-color: white; }
+        }
+    </style>
+</head>
+<body class="p-6 min-h-screen">
+
+    <div class="max-w-7xl mx-auto">
+        <h1 class="text-3xl font-bold text-gray-800 mb-6 text-center">问卷数据分析</h1>
+
+        <div class="card border-l-4 border-blue-600">
+            <h3 class="font-bold text-lg mb-4 border-b pb-2 text-gray-700">第一步：导入 Excel 文件</h3>
+            
+            <div class="bg-blue-50 p-4 rounded mb-4 text-sm text-blue-800">
+                <p class="font-bold">📄 单文件格式要求：</p>
+                <ul class="list-disc pl-5 mt-1 space-y-1">
+                    <li><strong>Sheet 1</strong>：试题结构 (id, title, A, B...)</li>
+                    <li><strong>Sheet 2</strong>：原始数据 (班级, 语文分层, 数学分层..., 1.1, 1.2...)</li>
+                </ul>
+            </div>
+
+            <input type="file" id="fileInput" accept=".xlsx, .xls" class="block w-full text-sm text-gray-500 file:mr-4 file:py-3 file:px-6 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700 cursor-pointer transition"/>
+            
+            <div id="statusMsg" class="mt-4 text-sm font-semibold text-gray-500">等待上传文件...</div>
+        </div>
+
+        <div id="controlPanel" class="card hidden">
+            <h3 class="font-bold text-lg mb-4 border-b pb-2 text-gray-700">第二步：分析配置</h3>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">📊 选择题目：</label>
+                    <select id="questionSelect" class="block w-full p-2 border border-gray-300 rounded-md bg-white shadow-sm focus:ring-2 focus:ring-blue-500 outline-none"></select>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">👥 分组方式 (自动切换)：</label>
+                    <select id="groupSelect" class="block w-full p-2 border border-gray-300 rounded-md bg-white shadow-sm focus:ring-2 focus:ring-blue-500 outline-none">
+                        <option value="班级">按 班级 查看</option>
+                        <option value="语文分层">按 语文分层 查看</option>
+                        <option value="数学分层">按 数学分层 查看</option>
+                        <option value="英语分层">按 英语分层 查看</option>
+                        <option value="科学分层">按 科学分层 查看</option>
+                        <option value="社会分层">按 社会分层 查看</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <div id="resultArea" class="hidden">
+            <div class="card">
+                <h2 id="displayTitle" class="text-xl font-bold text-center mb-6 text-blue-800"></h2>
+                <div id="tableContainer" class="overflow-x-auto"></div>
+            </div>
+            <div class="card">
+                <h3 class="font-bold text-gray-700 mb-4">可视化图表</h3>
+                <div class="chart-container">
+                    <canvas id="myChart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let questionMap = {}; 
+        let rawData = [];
+        let chartInstance = null;
+
+        // 监听文件上传
+        document.getElementById('fileInput').addEventListener('change', handleFile);
+        
+        const qSelect = document.getElementById('questionSelect');
+        const gSelect = document.getElementById('groupSelect');
+
+        // --- 智能联动核心逻辑 ---
+        qSelect.addEventListener('change', function() {
+            const qId = qSelect.value;
+            if (!qId) return;
+            
+            const qData = questionMap[qId];
+            const title = qData.title;
+
+            // 自动判断逻辑
+            let targetGroup = "班级"; // 默认值
+
+            if (title.includes("语文")) {
+                targetGroup = "语文分层";
+            } else if (title.includes("数学")) {
+                targetGroup = "数学分层";
+            } else if (title.includes("英语")) {
+                targetGroup = "英语分层";
+            } else if (title.includes("科学")) {
+                targetGroup = "科学分层";
+            } else if (title.includes("道法") || title.includes("地理") || title.includes("历史") || title.includes("社会")) {
+                // 特殊规则：道法/地理/历史 -> 社会分层
+                targetGroup = "社会分层";
+            }
+
+            // 只有当目标分组在原始数据中存在（或下拉框有这个选项）时才切换
+            // 这里直接切换下拉框的值
+            gSelect.value = targetGroup;
+            
+            // 给下拉框加个闪烁效果提示用户它变了
+            gSelect.classList.add('highlight-change');
+            setTimeout(() => gSelect.classList.remove('highlight-change'), 1000);
+
+            // 渲染视图
+            renderCurrentView();
+        });
+
+        // 监听手动切换分组
+        gSelect.addEventListener('change', renderCurrentView);
+
+        function handleFile(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    // 全平台通用：Windows + 鸿蒙都支持
+    file.arrayBuffer().then(buffer => {
+        try {
+            const data = new Uint8Array(buffer);
+            const workbook = XLSX.read(data, { type: 'array' });
+
+            if (workbook.SheetNames.length < 2) {
+                alert("❌ 错误：Excel 必须包含至少两个 Sheet！");
+                return;
+            }
+
+            const sheet1 = workbook.Sheets[workbook.SheetNames[0]];
+            processQuestions(XLSX.utils.sheet_to_json(sheet1));
+
+            const sheet2 = workbook.Sheets[workbook.SheetNames[1]];
+            rawData = XLSX.utils.sheet_to_json(sheet2, { defval: "" });
+
+            updateStatus(true, Object.keys(questionMap).length, rawData.length);
+        } catch (err) {
+            console.error(err);
+            alert("读取 Excel 失败，请检查格式。");
+        }
+    }).catch(err => {
+        console.error(err);
+        alert("⚠️ 读取文件失败：请关闭鸿蒙安全模式后重试");
+    });
+}
+
+        function processQuestions(json) {
+            questionMap = {};
+            qSelect.innerHTML = '<option value="">-- 请选择题目 --</option>';
+
+            json.forEach(row => {
+                let id = row['id'] || row['题号'];
+                let title = row['title'] || row['题目'];
+                if(id && title) {
+                    id = String(id).trim();
+                    let options = {};
+                    "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").forEach(key => {
+                        if (row[key]) options[key] = String(row[key]).trim();
+                    });
+                    
+                    questionMap[id] = { title: title, definedOptions: options };
+                    
+                    let option = document.createElement('option');
+                    option.value = id;
+                    option.innerText = `${id} - ${title.substring(0, 50)}`;
+                    qSelect.appendChild(option);
+                }
+            });
+        }
+
+        function updateStatus(success, qCount, dCount) {
+            if (success) {
+                const el = document.getElementById('statusMsg');
+                el.innerHTML = `✅ 读取成功！题目：<b>${qCount}</b>，数据：<b>${dCount}</b>条。`;
+                el.className = "mt-4 text-sm font-bold text-green-600";
+                document.getElementById('controlPanel').classList.remove('hidden');
+            }
+        }
+
+        function renderCurrentView() {
+            const qId = qSelect.value;
+            const groupBy = gSelect.value;
+
+            if (!qId || !groupBy || rawData.length === 0) {
+                document.getElementById('resultArea').classList.add('hidden');
+                return;
+            }
+
+            document.getElementById('resultArea').classList.remove('hidden');
+            const qData = questionMap[qId];
+            document.getElementById('displayTitle').innerText = qData.title;
+
+            let dataKey = Object.keys(rawData[0]).find(k => String(k).trim() === qId);
+            if (!dataKey) {
+                document.getElementById('tableContainer').innerHTML = `<p class="text-red-500 p-4">⚠️ 错误：在原始数据表(Sheet2)中找不到表头 "${qId}"。</p>`;
+                return;
+            }
+
+            // --- 统计逻辑 ---
+            let groups = [...new Set(rawData.map(r => r[groupBy]).filter(v => v && String(v).trim() !== ''))];
+            groups.sort();
+
+            let stats = {};
+            let totalStats = { RespondentCount: 0 }; 
+            groups.forEach(g => { stats[g] = { RespondentCount: 0 }; });
+
+            let actualOptions = new Set();
+
+            rawData.forEach(row => {
+                let groupVal = row[groupBy];
+                if (!groupVal || String(groupVal).trim() === '') return;
+                
+                let answerRaw = String(row[dataKey] || "").trim().toUpperCase();
+                if (!answerRaw) return;
+
+                stats[groupVal].RespondentCount++;
+                totalStats.RespondentCount++;
+
+                // 多选拆分逻辑
+                let selections = answerRaw.match(/[A-Z]/g); 
+                if (selections) {
+                    selections.forEach(opt => {
+                        actualOptions.add(opt);
+                        if (!stats[groupVal][opt]) stats[groupVal][opt] = 0;
+                        stats[groupVal][opt]++;
+                        if (!totalStats[opt]) totalStats[opt] = 0;
+                        totalStats[opt]++;
+                    });
+                }
+            });
+
+            let finalOptionKeys = Object.keys(qData.definedOptions);
+            if (finalOptionKeys.length === 0) finalOptionKeys = Array.from(actualOptions).sort();
+            else {
+                actualOptions.forEach(opt => {
+                    if (!finalOptionKeys.includes(opt)) finalOptionKeys.push(opt);
+                });
+                finalOptionKeys.sort();
+            }
+
+            // 渲染表格
+            let thead = `<thead><tr><th style="width: 120px; background:#eff6ff;">${groupBy}</th>`;
+            finalOptionKeys.forEach(opt => {
+                const desc = qData.definedOptions[opt] ? `<span class="option-desc">${qData.definedOptions[opt]}</span>` : '';
+                thead += `<th>选项 ${opt}${desc}</th>`;
+            });
+            thead += `</tr></thead>`;
+
+            let tbody = `<tbody>`;
+            groups.forEach(g => {
+                tbody += `<tr><td class="font-medium">${g} <span class="text-xs text-gray-400">(${stats[g].RespondentCount}人)</span></td>`;
+                let gTotal = stats[g].RespondentCount;
+                finalOptionKeys.forEach(opt => {
+                    let count = stats[g][opt] || 0;
+                    let pct = gTotal > 0 ? (count / gTotal * 100).toFixed(2) + '%' : '0.00%';
+                    let style = count === 0 ? 'color: #e5e7eb;' : 'color: #1f2937;';
+                    tbody += `<td style="${style}">${pct}</td>`;
+                });
+                tbody += `</tr>`;
+            });
+            tbody += `<tr class="total-row"><td>段总体 <span class="text-xs text-blue-300">(${totalStats.RespondentCount}人)</span></td>`;
+            finalOptionKeys.forEach(opt => {
+                let count = totalStats[opt] || 0;
+                let pct = totalStats.RespondentCount > 0 ? (count / totalStats.RespondentCount * 100).toFixed(2) + '%' : '0.00%';
+                tbody += `<td>${pct}</td>`;
+            });
+            tbody += `</tr></tbody>`;
+
+            document.getElementById('tableContainer').innerHTML = `<table>${thead + tbody}</table>`;
+
+            renderChart(groups, finalOptionKeys, stats, totalStats, qData.definedOptions);
+        }
+
+        function renderChart(groups, options, stats, totalStats, definedOptions) {
+            const ctx = document.getElementById('myChart').getContext('2d');
+            if (chartInstance) chartInstance.destroy();
+
+            const chartLabels = [...groups, "段总体"];
+            const colors = ['#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#8b5cf6', '#6366f1', '#ec4899', '#64748b'];
+
+            const datasets = options.map((opt, i) => {
+                const data = groups.map(g => {
+                    let count = stats[g][opt] || 0;
+                    let total = stats[g].RespondentCount;
+                    return total > 0 ? (count / total * 100).toFixed(2) : 0;
+                });
+                let tCount = totalStats[opt] || 0;
+                let tTotal = totalStats.RespondentCount;
+                data.push(tTotal > 0 ? (tCount / tTotal * 100).toFixed(2) : 0);
+
+                return {
+                    label: definedOptions[opt] ? `${opt}. ${definedOptions[opt]}` : `选项 ${opt}`,
+                    data: data,
+                    backgroundColor: colors[i % colors.length],
+                    borderColor: 'white',
+                    borderWidth: 1
+                };
+            });
+
+            chartInstance = new Chart(ctx, {
+                type: 'bar',
+                data: { labels: chartLabels, datasets: datasets },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { position: 'bottom', labels: { usePointStyle: true, padding: 20 } },
+                        datalabels: {
+                            anchor: 'end', align: 'top',
+                            formatter: (val) => Number(val) > 0 ? val + '%' : '',
+                            color: '#666', font: { size: 11 }
+                        },
+                        tooltip: {
+                            callbacks: { label: (c) => `${c.dataset.label}: ${c.raw}%` }
+                        }
+                    },
+                    scales: {
+                        y: { beginAtZero: true, max: 100, ticks: { callback: v => v + '%' } },
+                        x: { grid: { display: false } }
+                    }
+                },
+                plugins: [ChartDataLabels]
+            });
+        }
+    </script>
+</body>
+</html>
